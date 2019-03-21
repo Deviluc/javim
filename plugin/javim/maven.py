@@ -160,7 +160,13 @@ class Maven():
         if not pom:
             return None
 
-        name = name if name else self.xpath(pom, Maven.NAME_XPATH, namespace)[0]
+        if not name:
+            pom_name = self.xpath(pom, Maven.NAME_XPATH, namespace)
+            if pom_name:
+                name = pom_name[0]
+            else:
+                name = self.xpath(pom, Maven.ARTIFACTID_XPATH, namespace)
+
         if name in self.workspace.projects():
             self.__print_error(("There is already a project with name '%s' in "
                                 "the current workspace!") % name)
@@ -260,9 +266,12 @@ class Maven():
         info['groupId'] = tree_xpath(Maven.GROUPID_XPATH)[0]
         info['artifactId'] = tree_xpath(Maven.ARTIFACTID_XPATH)[0]
         info['version'] = tree_xpath(Maven.VERSION_XPATH)[0]
-        info['name'] = tree_xpath(Maven.NAME_XPATH)[0]
-        info['description'] = tree_xpath(Maven.DESCRIPTION_XPATH)[0]
-        info['url'] = tree_xpath(Maven.URL_XPATH)[0]
+        name_elem = tree_xpath(Maven.NAME_XPATH)
+        info['name'] = name_elem[0] if name_elem else None
+        desc_elem = tree_xpath(Maven.DESCRIPTION_XPATH)
+        info['description'] = desc_elem[0] if desc_elem else None
+        url_elem = tree_xpath(Maven.URL_XPATH)
+        info['url'] = url_elem[0] if url_elem else None
 
         config = project['maven_config']
         config['profiles'] = tree_xpath(Maven.PROFILES_XPATH)
@@ -363,19 +372,4 @@ class Maven():
                                    project,
                                    config['selected_profiles'],
                                    config['set_properties'])
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
