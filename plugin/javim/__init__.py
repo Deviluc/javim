@@ -52,7 +52,7 @@ class Javim():
         line = self.vim.eval('getline(' + str(line_num) + ')')
         names = []
         configs = []
-        for i, configProvider in enumerate(RunConfiguration.PROVIDER):
+        for i, (name, configProvider) in enumerate(RunConfiguration.PROVIDER.items()):
             if configProvider.mayrun(line, row_num):
                 names.append(str(i) + ": " + configProvider.name)
                 configs.append(configProvider)

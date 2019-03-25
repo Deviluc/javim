@@ -1,6 +1,6 @@
 """ Provides configuration objects persistent in the workspace """
 
-
+from enum import Enum
 from os import path, environ, mkdir, symlink, unlink
 from os.path import join, exists, normpath, basename, expanduser
 from shutil import rmtree
@@ -124,7 +124,7 @@ class Workspace(GlobalSetting):
                 'dir_name': dir_name,
                 'open': True,
                 'built': False,
-                'run_config_names': [],
+                'run_config_names': {},
                 'run_configs': {}}
             symlink(directory, join(self.dir(), dir_name))
             project = self.projects()[name]
@@ -143,7 +143,7 @@ class Workspace(GlobalSetting):
                                      'dir_name': name,
                                      'open': True,
                                      'built': False,
-                                     'run_config_names': [],
+                                     'run_config_names': {},
                                      'run_configs': {}}
             project = self.projects()[name]
             project['settings_dir'] = join(project['path'], ".settings")
@@ -212,7 +212,7 @@ class RunConfiguration(ProjectSetting):
 
     @staticmethod
     def register_provider(provider):
-        provider[provider.name] = provider
+        RunConfiguration.PROVIDER[provider.name] = provider
         for hook in RunConfiguration.PROVIDER_REGISTER_HOOKS:
             hook(provider)
 
@@ -226,9 +226,10 @@ class RunConfiguration(ProjectSetting):
                                                     **extra))
 
         project['run_configs'][name] = self
-        if name not in project['run_config_names']:
-            project['run_config_names'][name] = {'provider_name': provider.name,
-                                                 'config_name': name}
+        if name not in project['run_config_names'] and provider:
+            project['run_config_names']["name"] = {'provider_name': provider.name,
+                                                   'config_name': name}
+
 
 class ProgramArgument:
 
@@ -241,6 +242,7 @@ class ProgramArgument:
     def build(self, value):
         return self.template.replace("{value}", str(value))
 
+
 class JavaProgramArguments(Enum):
 
     CUSTOM_ARGUMENT = ProgramArgument("Custom argument", "", "{value}")
@@ -248,15 +250,6 @@ class JavaProgramArguments(Enum):
 
 class JavaRunConfiguration(RunConfiguration):
 
-    MAIN_METH_REGEX = re.compile("(public|static)\\s+(static|public)\\s+void\\s+main\\s*\\(\\s*(final\\s+)?String\\[\\]\\s+\\w+\\s*\\)")
-
-    BASE_COMMAND = "java -cp \"{classpath}\" {mainClass} {args}"
-    DEBUG_COMMAND = "java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address={port} -cp \"{classpath}\" {mainClass} {args}"
-
-    RunConfiguration.PROVIDER["Java Application"] = RunConfigurationProvider("Java Application",
-                                                              mayrun.__func__,
-                                                              create_config.__func__,
-                                                              JavaRunConfiguration.load_config)
 
     @staticmethod
     def mayrun(line, col):
@@ -280,7 +273,14 @@ class JavaRunConfiguration(RunConfiguration):
     def load_config(name, project):
         JavaRunConfiguration(name, project, None, None, None).rebuild_commands()
 
+    MAIN_METH_REGEX = re.compile("(public|static)\\s+(static|public)\\s+void\\s+main\\s*\\(\\s*(final\\s+)?String\\[\\]\\s+\\w+\\s*\\)")
+    BASE_COMMAND = "java -cp \"{classpath}\" {mainClass} {args}"
+    DEBUG_COMMAND = "java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address={port} -cp \"{classpath}\" {mainClass} {args}"
 
+    RunConfiguration.register_provider(RunConfigurationProvider("Java Application",
+                                                                mayrun.__func__,
+                                                                create_config.__func__,
+                                                                load_config.__func__))
 
     def __init__(self, name, project, main, cp_entries, args: dict = {}):
         command = ("java -cp \"" +
@@ -295,7 +295,8 @@ class JavaRunConfiguration(RunConfiguration):
                                                    command=command,
                                                    extra={'main_class': main,
                                                           'cp_entries': cp_entries,
-                                                          'args': args})
+                                                          'args': args},
+                                                   provider=RunConfiguration.PROVIDER["Java Application"])
         self.rebuild_commands()
 
     def rebuild_commands(self):
@@ -303,12 +304,13 @@ class JavaRunConfiguration(RunConfiguration):
         main = self.main_class()
         arg_str = " ".join(arg.build(value) for arg, value in self.args())
         command = JavaRunConfiguration.BASE_COMMAND.replace("{classpath}", cp)
-                                                   .replace("{mainClass}", main)
-                                                   .replace("{args}", arg_str)
+        command = command.replace("{mainClass}", main)
+        command = command.replace("{args}", arg_str)
 
         debug_command = JavaRunConfiguration.DEBUG_COMMAND.replace("{classpath}", cp)
-                                                          .replace("{mainClass}", main)
-                                                          .replace("{args}", arg_str)
+        debug_command = debug_command.replace("{mainClass}", main)
+        debug_command = debug_command.replace("{args}", arg_str)
+
         self.set_command(command)
         self.set_debug_command(debug_command)
 

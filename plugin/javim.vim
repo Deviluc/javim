@@ -105,10 +105,10 @@ augroup javim
     autocmd BufEnter * :call javim#bufEnter(expand("<abuf>"))
     autocmd BufDelete * :call javim#bufDelete(expand("<abuf>"))
     autocmd VimLeave * call javim#vimQuit()
-    autocmd TextChanged * :call javim#processTextChanged()
-    autocmd TextChangedI * :call javim#processTextChangedI()
-    autocmd TextChangedP * :call javim#processTextChangedP()
-    autocmd TextYankPost * :call javim#processTextYank()
+    "autocmd TextChanged * :call javim#processTextChanged()
+    "autocmd TextChangedI * :call javim#processTextChangedI()
+    "autocmd TextChangedP * :call javim#processTextChangedP()
+    "autocmd TextYankPost * :call javim#processTextYank()
 augroup END
 
 :call javim#init()
