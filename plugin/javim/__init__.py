@@ -9,10 +9,22 @@ __all__ = ["maven", "settings"]
 
 class Javim():
 
+    FIND_RESOURCES = 'find -L -type f -not \( -name "*.class" -or -name "*.java" -or -name "*.jar" \)'
+    FIND_CLASSES = 'find -L -name "*.java"'
+
+    FZF_FIND = ":nnoremap {map} :call fzf#run({'source': '{cmd} | sed ''s/^..//'', 'window': 'bot 10split enew', 'dir': '{dir}', 'sink': 'e'})"
+
     def __init__(self, vim):
         self.vim = vim
         self.maven = Maven(vim)
         self.buffers = {}
+        cmd = Javim.FZF_FIND.replace("{dir}", self.maven.workspace.dir())
+        class_cmd = cmd.replace("{cmd}", Javim.FIND_CLASSES).replace("{map}", "<leader>oc")
+        resource_cmd = cmd.replace("{cmd}", Javim.FIND_RESOURCES).replace("{map}", "<leader>or")
+
+        self.print("Class: " + class_cmd + "\nResource: " + resource_cmd)
+        vim.command(class_cmd)
+        vim.command(resource_cmd)
 
     def print(self, msg):
         self.vim.command("echom \"" + str(msg).replace("\"", "\\\"") + "\"")

@@ -104,7 +104,7 @@ class Workspace(GlobalSetting):
         for project_name in self.projects():
             project = self.projects()[project_name]
             project['run_configs'] = {}
-            for config in project['run_config_names']:
+            for config in project['run_config_names'].values():
                 if config['provider_name'] in RunConfiguration.PROVIDER:
                     RunConfiguration.PROVIDER[config['provider_name']].load_config_func(config['config_name'], project)
 
@@ -283,16 +283,9 @@ class JavaRunConfiguration(RunConfiguration):
                                                                 load_config.__func__))
 
     def __init__(self, name, project, main, cp_entries, args: dict = {}):
-        command = ("java -cp \"" +
-                   ":".join(cp_entries) +
-                   "\" " +
-                   main +
-                   " " +
-                   " ".join('"{0}"'.format(v) for v in args.values()))
-
         super(JavaRunConfiguration, self).__init__(name,
                                                    project,
-                                                   command=command,
+                                                   command="",
                                                    extra={'main_class': main,
                                                           'cp_entries': cp_entries,
                                                           'args': args},
