@@ -92,11 +92,21 @@ class Workspace(GlobalSetting):
         if not path.exists(self.settings_dir()):
             mkdir(self.settings_dir())
 
+        def load_configs(provider):
+            for project_name in self.projects():
+                project = self.projects()[project_name]
+                for config in project["run_config_names"].values():
+                    if provider.name == config['provider_name']:
+                        provider.load_config_func(config['config_name'], project)
+
+        RunConfiguration.PROVIDER_REGISTER_HOOKS.append(load_configs)
+
         for project_name in self.projects():
             project = self.projects()[project_name]
             project['run_configs'] = {}
-            for config_name in project['run_config_names']:
-                RunConfiguration(config_name, project)
+            for config in project['run_config_names']:
+                if config['provider_name'] in RunConfiguration.PROVIDER:
+                    RunConfiguration.PROVIDER[config['provider_name']].load_config_func(config['config_name'], project)
 
 
     def __cleanup__(self, data):
@@ -188,18 +198,25 @@ class ProjectSetting(PersistentSetting):
 
 class RunConfigurationProvider():
 
-    def __init__(self, name, mayrun_func, create_config_func):
+    def __init__(self, name, mayrun_func, create_config_func, load_config_func):
         self.name = name
         self.mayrun = mayrun_func
         self.create_config = create_config_func
-
+        self.load_config_func = load_config_func
 
 
 class RunConfiguration(ProjectSetting):
 
-    PROVIDER = []
+    PROVIDER = {}
+    PROVIDER_REGISTER_HOOKS = []
 
-    def __init__(self, name, project, command=None, debug_command=None, extra={}):
+    @staticmethod
+    def register_provider(provider):
+        provider[provider.name] = provider
+        for hook in RunConfiguration.PROVIDER_REGISTER_HOOKS:
+            hook(provider)
+
+    def __init__(self, name, project, command=None, debug_command=None, extra={}, provider=None):
         super(RunConfiguration, self).__init__("run_configuration_" + name.lower().replace(' ', '_'),
                                                project,
                                                dict({'name': name,
@@ -210,13 +227,36 @@ class RunConfiguration(ProjectSetting):
 
         project['run_configs'][name] = self
         if name not in project['run_config_names']:
-            project['run_config_names'].append(name)
+            project['run_config_names'][name] = {'provider_name': provider.name,
+                                                 'config_name': name}
+
+class ProgramArgument:
+
+    def __init__(self, name, description, template, possible_values=None):
+        self.name = name
+        self.description = description
+        self.template = template
+        self.possible_values = possible_values
+
+    def build(self, value):
+        return self.template.replace("{value}", str(value))
+
+class JavaProgramArguments(Enum):
+
+    CUSTOM_ARGUMENT = ProgramArgument("Custom argument", "", "{value}")
 
 
 class JavaRunConfiguration(RunConfiguration):
 
     MAIN_METH_REGEX = re.compile("(public|static)\\s+(static|public)\\s+void\\s+main\\s*\\(\\s*(final\\s+)?String\\[\\]\\s+\\w+\\s*\\)")
 
+    BASE_COMMAND = "java -cp \"{classpath}\" {mainClass} {args}"
+    DEBUG_COMMAND = "java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address={port} -cp \"{classpath}\" {mainClass} {args}"
+
+    RunConfiguration.PROVIDER["Java Application"] = RunConfigurationProvider("Java Application",
+                                                              mayrun.__func__,
+                                                              create_config.__func__,
+                                                              JavaRunConfiguration.load_config)
 
     @staticmethod
     def mayrun(line, col):
@@ -236,9 +276,10 @@ class JavaRunConfiguration(RunConfiguration):
                                             {})
         return None
 
-    RunConfiguration.PROVIDER.append(RunConfigurationProvider("Java Application",
-                                                              mayrun.__func__,
-                                                              create_config.__func__))
+    @staticmethod
+    def load_config(name, project):
+        JavaRunConfiguration(name, project, None, None, None).rebuild_commands()
+
 
 
     def __init__(self, name, project, main, cp_entries, args: dict = {}):
@@ -255,17 +296,21 @@ class JavaRunConfiguration(RunConfiguration):
                                                    extra={'main_class': main,
                                                           'cp_entries': cp_entries,
                                                           'args': args})
+        self.rebuild_commands()
+
+    def rebuild_commands(self):
+        cp = ":".join(self.cp_entries())
+        main = self.main_class()
+        arg_str = " ".join(arg.build(value) for arg, value in self.args())
+        command = JavaRunConfiguration.BASE_COMMAND.replace("{classpath}", cp)
+                                                   .replace("{mainClass}", main)
+                                                   .replace("{args}", arg_str)
+
+        debug_command = JavaRunConfiguration.DEBUG_COMMAND.replace("{classpath}", cp)
+                                                          .replace("{mainClass}", main)
+                                                          .replace("{args}", arg_str)
+        self.set_command(command)
+        self.set_debug_command(debug_command)
+
     def mayrun(self, line, col):
         return re.match is not None
-
-
-class UiTestRunConfiguration(JavaRunConfiguration):
-
-    SETTINGS = GlobalSetting("ui-test", {'use_workspace_project': True})
-
-
-    def __init__(self, name, project, testClass, testMethods, customer,
-                 version):
-        pass
-
-
