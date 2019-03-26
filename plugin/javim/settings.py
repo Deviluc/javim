@@ -14,7 +14,7 @@ class PersistentSetting():
 
     SETTINGS = []
 
-    def __init__(self, directory, name, defaults, cleanup_func=None):
+    def __init__(self, directory, name, defaults, cleanup_func=None, on_load=None):
         self.path = path.join(directory, name) + ".json"
         self.__cleanup = cleanup_func
         if exists(self.path):
@@ -30,19 +30,34 @@ class PersistentSetting():
             setattr(self, key, (lambda k: lambda: self.data[k])(key))
 
         PersistentSetting.SETTINGS.append(self)
+        self.on_load = on_load
 
 
-    def __save(self):
+    def _save(self):
         if self.__cleanup:
             self.__cleanup(self.data)
 
         with open(self.path, 'w') as f:
             f.write(dumps(self.data, indent=4))
 
+    def _load(self):
+        with open(self.path, 'r') as f:
+            self.data = loads(f.read())
+
+        for key in self.data:
+            setattr(self,
+                    "set_" + key,
+                    (lambda k: lambda v: self.data.update({k: v}))(key))
+            setattr(self, key, (lambda k: lambda: self.data[k])(key))
+
+        if self.on_load:
+            self.on_load(self)
+
+
     @staticmethod
     def save_all():
         for setting in PersistentSetting.SETTINGS:
-            setting.__save()
+            setting._save()
 
 
 
@@ -70,6 +85,8 @@ class GlobalSetting(PersistentSetting):
 # pylint: disable=no-member
 class Workspace(GlobalSetting):
     """ A workspace is a collection of projects """
+
+    INSTANCE = None
 
     def __init__(self, name="Default workspace",
                  path_=path.join(expanduser('~'), 'javim-workspace')):
@@ -107,6 +124,7 @@ class Workspace(GlobalSetting):
             for config in project['run_config_names'].values():
                 if config['provider_name'] in RunConfiguration.PROVIDER:
                     RunConfiguration.PROVIDER[config['provider_name']].load_config_func(config['config_name'], project)
+        Workspace.INSTANCE = self
 
 
     def __cleanup__(self, data):
@@ -189,11 +207,12 @@ class ProjectSetting(PersistentSetting):
     """ Represents an object that is persistent across sessions in a """
     """specific project"""
 
-    def __init__(self, name, project, defaults, cleanup_func=None):
+    def __init__(self, name, project, defaults, cleanup_func=None, on_load=None):
         super(ProjectSetting, self).__init__(project['settings_dir'],
                                              name,
                                              defaults,
-                                             cleanup_func)
+                                             cleanup_func=cleanup_func,
+                                             on_load=on_load)
 
 
 class RunConfigurationProvider():
@@ -216,19 +235,23 @@ class RunConfiguration(ProjectSetting):
         for hook in RunConfiguration.PROVIDER_REGISTER_HOOKS:
             hook(provider)
 
-    def __init__(self, name, project, command=None, debug_command=None, extra={}, provider=None):
+    def __init__(self, name, project, command=None, debug_command=None, extra={}, provider=None, cleanup_func=None, on_load=None):
         super(RunConfiguration, self).__init__("run_configuration_" + name.lower().replace(' ', '_'),
                                                project,
                                                dict({'name': name,
                                                      'project_name': project['name'],
                                                      'command': command,
                                                      'debug_command': debug_command},
-                                                    **extra))
+                                                    **extra),
+                                               cleanup_func=cleanup_func,
+                                               on_load=on_load)
 
         project['run_configs'][name] = self
         if name not in project['run_config_names'] and provider:
             project['run_config_names']["name"] = {'provider_name': provider.name,
                                                    'config_name': name}
+    def update(self, maven):
+        pass
 
 
 class ProgramArgument:
@@ -250,6 +273,15 @@ class JavaProgramArguments(Enum):
 
 class JavaRunConfiguration(RunConfiguration):
 
+    @staticmethod
+    def filename_to_class(project, source_file):
+        for source_dir in project['maven_config']['source_dirs']:
+            if source_file.startswith(source_dir):
+                main_class = source_file[len(source_dir) + 1:].replace("/", ".")
+                main_class = main_class[:-len(".java")]
+                return main_class
+        return None
+
 
     @staticmethod
     def mayrun(line, col):
@@ -258,20 +290,15 @@ class JavaRunConfiguration(RunConfiguration):
 
     @staticmethod
     def create_config(line, col, source_file, project, maven):
-        for source_dir in project['maven_config']['source_dirs']:
-            if source_file.startswith(source_dir):
-                main_class = source_file[len(source_dir) + 1:].replace("/", ".")
-                main_class = main_class[:-len(".java")]
-                return JavaRunConfiguration(main_class + "$main",
-                                            project,
-                                            main_class,
-                                            maven.generate_classpath_entries(project),
-                                            {})
-        return None
+        main_class = JavaRunConfiguration.filename_to_class(project, source_file)
+        return JavaRunConfiguration(main_class + "$main",
+                                    project,
+                                    main_class,
+                                    {})
 
     @staticmethod
     def load_config(name, project):
-        JavaRunConfiguration(name, project, None, None, None).rebuild_commands()
+        JavaRunConfiguration(name, project, None, None).rebuild_commands()
 
     MAIN_METH_REGEX = re.compile("(public|static)\\s+(static|public)\\s+void\\s+main\\s*\\(\\s*(final\\s+)?String\\[\\]\\s+\\w+\\s*\\)")
     BASE_COMMAND = "java -cp \"{classpath}\" {mainClass} {args}"
@@ -282,20 +309,22 @@ class JavaRunConfiguration(RunConfiguration):
                                                                 create_config.__func__,
                                                                 load_config.__func__))
 
-    def __init__(self, name, project, main, cp_entries, args: dict = {}):
+    def __init__(self, name, project, main, args: dict = {}):
         super(JavaRunConfiguration, self).__init__(name,
                                                    project,
                                                    command="",
                                                    extra={'main_class': main,
-                                                          'cp_entries': cp_entries,
+                                                          'classpath': project['maven_config']['classpath'],
                                                           'args': args},
-                                                   provider=RunConfiguration.PROVIDER["Java Application"])
+                                                   provider=RunConfiguration.PROVIDER["Java Application"],
+                                                   on_load=lambda c: c.rebuild_commands())
         self.rebuild_commands()
 
     def rebuild_commands(self):
-        cp = ":".join(self.cp_entries())
+        project = Workspace.INSTANCE.projects()[self.project_name()]
+        cp = project['maven_config']['classpath']
         main = self.main_class()
-        arg_str = " ".join(arg.build(value) for arg, value in self.args())
+        arg_str = " ".join(arg.build(value) for arg, value in self.args().items())
         command = JavaRunConfiguration.BASE_COMMAND.replace("{classpath}", cp)
         command = command.replace("{mainClass}", main)
         command = command.replace("{args}", arg_str)
@@ -309,3 +338,6 @@ class JavaRunConfiguration(RunConfiguration):
 
     def mayrun(self, line, col):
         return re.match is not None
+
+    def update(self):
+        self.rebuild_commands()

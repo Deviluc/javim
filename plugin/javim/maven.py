@@ -86,6 +86,7 @@ class Maven():
                                    'dependencies': [],
                                    'dep_classpath': [],
                                    'dep_projects': [],
+                                   'rebuild': True,
                                    'last_built': None}
 
         project['maven_info'] = {'groupId': '',
@@ -165,7 +166,7 @@ class Maven():
             if pom_name:
                 name = pom_name[0]
             else:
-                name = self.xpath(pom, Maven.ARTIFACTID_XPATH, namespace)
+                name = self.xpath(pom, Maven.ARTIFACTID_XPATH, namespace)[0]
 
         if name in self.workspace.projects():
             self.__print_error(("There is already a project with name '%s' in "
@@ -200,6 +201,9 @@ class Maven():
                                                  profiles_,
                                                  props))
         project['maven_config']['last_built'] = time.time()
+        project['maven_config']['classpath'] = self.generate_classpath(project)
+        for config in project['run_configs'].values():
+            config.update()
 
     def read_xml_with_namespace(self, path):
         """ Reads the file from path into an xml-tree and extracts the """
@@ -336,6 +340,27 @@ class Maven():
         entries.append(config['output_dir'])
 
         return entries
+
+    def generate_classpath(self, project):
+        """ Generates a string with all classpath entries needed to run the provided project """
+        config = project['maven_config']
+        tmp_cp_path = join(self.workspace.dir(), "." + project['name'] + "-cp.txt")
+        args = [self.executable, "-Dmdep.outputFile=" + tmp_cp_path, "dependency:build-classpath"]
+        res = run(args,
+                  capture_output=True,
+                  encoding="utf-8",
+                  cwd=project['path'])
+        if res.returncode:
+            self.__print_error("Error generating classpath for project '" + project['name'] + "'\n" + res.stdout)
+            remove(tmp_cp_path)
+            return None
+        cp = None
+
+        with open(tmp_cp_path, 'r') as f:
+            cp = f.read()
+        remove(tmp_cp_path)
+
+        return cp
 
     def process_added_project(self, project):
         """ Should be called when a new maven project was added to update """

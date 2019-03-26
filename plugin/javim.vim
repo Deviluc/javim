@@ -99,6 +99,7 @@ EOF
 endfunction
 
 :command! -nargs=1 -complete=dir ProjectImport call javim#projectImport(<f-args>)
+:command! -nargs=0 EditRunConfiguration python3 javim.edit_run_configurations()
 
 augroup javim
     autocmd!
