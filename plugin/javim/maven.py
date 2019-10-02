@@ -3,9 +3,11 @@
 from os import mkdir, remove
 from os.path import exists, join, basename, normpath, expanduser
 from subprocess import run
+from tempfile import NamedTemporaryFile
 import time
 from lxml import etree
 from .settings import Workspace, GlobalSetting
+from .jobs import Job, JobHandler
 
 
 class Maven():
@@ -18,11 +20,13 @@ class Maven():
                          "-DinteractiveMode=false")
     PROPERTIES_TEMPLATE = "-D%s=%s"
     PROFILES_TEMPLATE = "-P%s"
-    BUILD_TEMPLATE = "!%s -f %s %s %s %s" 
+    BUILD_TEMPLATE = "%s -f %s %s %s %s" 
     GEN_POM_TEMPLATE = "%s help:effective-pom %s"
     DEP_KEY_TEMPLATE = "%s:%s:%s"
     LOCAL_REPO_TEMPLATE = ("%s help:evaluate -Dexpression="
                            "settings.localRepository -Doutput=%s")
+    JARFILE_TEMPLATE = ("%(groupId)s/%(artifactId)s/%(version)s/"
+                        "%(artifactId)s-%(version)s.jar")
 
     GROUPID_XPATH = "//ns:project/ns:groupId/text()"
     ARTIFACTID_XPATH = "//ns:project/ns:artifactId/text()"
@@ -63,6 +67,7 @@ class Maven():
         self.executable = Maven.SETTINGS.executable()
         vim.command("cd " + self.workspace.dir())
         Maven.INSTANCE = self
+        self.job_handler = JobHandler(vim)
 
     def __print_error(self, msg):
         self.vim.command("echoerr \"%s\"" % msg)
@@ -71,12 +76,24 @@ class Maven():
         self.vim.command("echo \"%s\"" % (msg.replace("\n", "\\n")))
 
 
+    def chain_visible_backgroud_jobs(self, cmds):
+        script = " && ".join(cmds)
+        script_file = NamedTemporaryFile(mode="w", suffix="vbj_script", delete=False)
+        script_file.write(script)
+        file_path = script_file.name
+        script_file.close()
+        self.vim.command("bot 10sp | call termopen('bash " + script_file.name + "')")
+
+    def execute_visible_backgroud_command(self, cmd):
+        self.vim.command("bot 10sp | call termopen('" + cmd.replace("'", "''") + "')")
+        self.vim.command("file Console")
+
     def init_project_config(self, project):
         """ Creates the initial project configuration with default values """
         project['maven_config'] = {'profiles': [],
                                    'selected_profiles': [],
                                    'properties': {},
-                                   'set_propreties': {},
+                                   'set_properties': {},
                                    'source_dirs': [],
                                    'test_source_dirs': [],
                                    'resource_dirs': [],
@@ -311,6 +328,10 @@ class Maven():
     def generate_classpath_entries(self, project):
         """ Generates a list of entries to add to the classpath in order to """
         """ run the provided project """
+        #TODO: fixme (add transitive dependencies)
+        self.__print_error("Not implemented!")
+        return None
+
         config = project['maven_config']
         entries = []
         base = Maven.SETTINGS.repo_path()
@@ -338,8 +359,16 @@ class Maven():
             entries.append(path)
 
         entries.append(config['output_dir'])
+        entries.append(config['test_output_dir'])
 
         return entries
+
+    def generate_jarfile_path(self, project):
+        info = project['maven_info']
+        jar_file_path = Maven.JARFILE_TEMPLATE % {'groupId': info['groupId'].replace(".", "/"),
+                                                  'artifactId': info['artifactId'],
+                                                  'version': info['version']}
+        return join(Maven.SETTINGS.repo_path(), jar_file_path)
 
     def generate_classpath(self, project):
         """ Generates a string with all classpath entries needed to run the provided project """
@@ -359,8 +388,19 @@ class Maven():
         with open(tmp_cp_path, 'r') as f:
             cp = f.read()
         remove(tmp_cp_path)
+        entries = cp.split(":")
+        for proj in self.workspace.projects().values():
+            if not proj['open']: continue
 
-        return cp
+            jar_file = self.generate_jarfile_path(proj)
+            if jar_file in entries:
+                entries.remove(jar_file)
+                entries.append(proj['maven_config']['output_dir'])
+
+
+        entries.append(config['output_dir'])
+        entries.append(config['test_output_dir'])
+        return ":".join(entries)
 
     def process_added_project(self, project):
         """ Should be called when a new maven project was added to update """
@@ -371,12 +411,12 @@ class Maven():
         project_dep_key = Maven.DEP_KEY_TEMPLATE % (info['groupId'],
                                                     info['artifactId'],
                                                     info['version'])
-        for proj in self.workspace.projects():
+        for proj in self.workspace.projects().values():
             if proj is not project and 'maven_info' in proj:
                 info_ = proj['maven_info']
                 config_ = proj['maven_config']
                 name_ = proj['name']
-                proj_dep_key = Maven.DEP_KEY_TEMPLATE % (info_['groupdId'],
+                proj_dep_key = Maven.DEP_KEY_TEMPLATE % (info_['groupId'],
                                                          info_['artifactId'],
                                                          info_['version'])
 
@@ -390,7 +430,7 @@ class Maven():
 
     def build_workspace(self):
         """ Build every maven project in the workspace """
-        for project in self.workspace.projects():
+        for project in self.workspace.projects().values():
             if 'maven_config' in project:
                 config = project['maven_config']
                 self.build_project(["compile"],
@@ -398,3 +438,92 @@ class Maven():
                                    config['selected_profiles'],
                                    config['set_properties'])
 
+    def build_project_and_dependencies(self, project, callback=None):
+        projects = [project['name']]
+        for project_name in projects:
+            proj = self.workspace.projects()[project_name]
+            for _project_name in proj['maven_config']['dep_projects']:
+                if _project_name not in projects:
+                    projects.append(_project_name)
+        
+        projects = list(map(self.workspace.projects().__getitem__, projects))
+        build_order = []
+        while projects:
+            found = False
+            for i, project in enumerate(projects):
+                config = project['maven_config']
+                if not config['dep_projects']:
+                    build_order.append(project['name'])
+                    del projects[i]
+                    found = True
+                    break
+                else:
+                    all_met = True
+                    for name in config['dep_projects']:
+                        if name not in build_order:
+                            all_met = False
+                            break
+                    if all_met:
+                        build_order.append(project['name'])
+                        del projects[i]
+                        found = True
+                        break
+            if not found:
+                self.__print_error("Build dependency cycle detected!")
+                return
+
+        build_order = list(map(self.workspace.projects().__getitem__, build_order))
+        for i in reversed(range(len(build_order))):
+            project = build_order[i]
+            if not project['maven_config']['rebuild']:
+                del build_order[i]
+
+        for i, project in enumerate(build_order):
+
+            _callback = callback if i == len(build_order) - 1 else None
+            cfg = project['maven_config']
+            job = BuildProjectJob(project,
+                                  ["compile", "install"],
+                                  cfg['selected_profiles'],
+                                  cfg['set_properties'],
+                                  _callback,
+                                  True)
+            self.job_handler.start(job)
+        if not build_order and callback:
+            callback()
+
+
+class BuildProjectJob(Job):
+
+    def __init__(self, project, goals, profiles=[], properties={}, callback=None, fail_clear=False):
+        self.project = project
+        goals_ = " ".join(goals)
+        profiles_ = ",".join(profiles or [])
+        if profiles:
+            profiles_ = Maven.PROFILES_TEMPLATE % profiles_
+        props = " ".join(map(lambda k: Maven.PROPERTIES_TEMPLATE
+                             % (k, properties[k]), properties or []))
+
+        cmd = Maven.BUILD_TEMPLATE % (Maven.SETTINGS.executable(),
+                                     project['path'],
+                                     goals_,
+                                     profiles_,
+                                     props)
+
+        def on_exit(result):
+            if result.return_code == 0:
+                config = project['maven_config']
+                config['last_built'] = time.time()
+                config['classpath'] = Maven.INSTANCE.generate_classpath(project)
+                config['rebuild'] = False
+
+                for config in project['run_configs'].values():
+                    config.update()
+                if callback:
+                    callback()
+
+        super(BuildProjectJob, self).__init__("maven_build",
+                                              project['path'],
+                                              cmd,
+                                              on_exit,
+                                              fail_clear)

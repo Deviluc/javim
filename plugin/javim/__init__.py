@@ -1,18 +1,26 @@
 from pynvim.plugin import plugin, command
+from json import dumps, loads
+import os
+import tempfile
 
 
 from .maven import Maven
 from .settings import RunConfiguration, PersistentSetting
+from .buffer_change import BufferChangeDispatcher
+from .java import JavaAstBufferChangeListener
 
 __all__ = ["maven", "settings"]
 
 
 class Javim():
 
-    FIND_RESOURCES = 'find -L -type f -not \( -name "*.class" -or -name "*.java" -or -name "*.jar" \)'
-    FIND_CLASSES = 'find -L -name "*.java"'
+    FIND_RESOURCES = 'find -L -type f -not \\( -name "*.class" -or -name "*.java" -or -name "*.jar" -or -path "*/target/*" \\)'
+    FIND_CLASSES = 'find -L -type f -name "*.java"'
 
-    FZF_FIND = ":nnoremap {map} :call fzf#run({'source': '{cmd} | sed ''s/^..//'', 'window': 'bot 10split enew', 'dir': '{dir}', 'sink': 'e'})"
+    FZF_FIND = "nnoremap {map} :call fzf#run({'source': '{cmd} \\| sed \"s/^..//\"', 'window': 'bot 10split enew', 'dir': '{dir}', 'sink': 'e'})<CR>"
+
+    NERDTREE_REFRESH_ROOT = "::NERDTreeRefreshRoot"
+
 
     def __init__(self, vim):
         self.vim = vim
@@ -21,10 +29,23 @@ class Javim():
         cmd = Javim.FZF_FIND.replace("{dir}", self.maven.workspace.dir())
         class_cmd = cmd.replace("{cmd}", Javim.FIND_CLASSES).replace("{map}", "<leader>oc")
         resource_cmd = cmd.replace("{cmd}", Javim.FIND_RESOURCES).replace("{map}", "<leader>or")
+        vim.command(class_cmd)
+        vim.command(resource_cmd)
+        self.last_config = None
 
-        self.print("Class: " + class_cmd + "\nResource: " + resource_cmd)
-        #vim.command(class_cmd)
-        #vim.command(resource_cmd)
+        self.debug_port = 8100
+        self.event_listeners = {}
+        self.listen_path = vim.command_output(":let a = systemlist('echo $NVIM_LISTEN_ADDRESS')|echo a[0]")
+        #self.change_dispatcher = BufferChangeDispatcher(self.vim, True)
+        #self.java_ast = JavaAstBufferChangeListener(self.vim)
+        #self.change_dispatcher.register_filetype_listener(self.java_ast, [".java"])
+
+
+    def __handle_event(self, name, event):
+        if name in self.event_listeners:
+            for listener in self.event_listeners:
+                listener(*event)
+
 
     def print(self, msg):
         self.vim.command("echom \"" + str(msg).replace("\"", "\\\"") + "\"")
@@ -59,12 +80,50 @@ class Javim():
                         self.buffers[buf_num] = {'project_name': project_name}
                         return
 
+    def find_project_by_buffer(self, buf_num):
+        buff = self.vim.buffers[buf_num]
+
+        if "project_name" not in buff.vars:
+            if buff.valid and buff.name:
+                file_name = buff.name
+                for project_name, project in self.maven.workspace.projects().items():
+                    if file_name.startswith(project['path']):
+                        buff.vars['project_name'] = project_name
+                        self.buffers[buf_num] = {'project_name': project_name}
+                        return project
+        else:
+            return self.maven.workspace.projects()[buff.vars["project_name"]]
+
 
     def buf_delete(self, buf_num):
         if buf_num in self.buffers:
             del self.buffers[buf_num]
 
-    def runAs(self, line_num, row_num):
+    def buf_save(self, buf_num):
+        buff = self.vim.buffers[buf_num]
+        if "project_name" in buff.vars:
+            project = self.maven.workspace.projects()[buff.vars['project_name']]
+            project['maven_config']['rebuild'] = True
+
+    def __run_config(self, config, is_debug=False):
+        buf_nr = int(self.vim.eval('bufnr("Console")'))
+        if buf_nr != -1:
+            self.vim.command("b %i | bw!" % buf_nr)
+        command = config.command() if not is_debug else config.debug_command()
+        if is_debug:
+            command = command.replace("{port}", str(self.debug_port))
+        self.print("Running command: " + command)
+        self.vim.command("bot 10sp | enew | call termopen('" + command.replace("'", "''") + "')")
+        self.vim.command("file Console")
+        self.vim.command("normal G")
+
+        if is_debug:
+            self.vim.command("call vebugger#jdb#attach('" + str(self.debug_port) + "', {'srcpath':" + str(config.src()) + "})")
+            self.debug_port += 1
+
+        self.last_config = config
+
+    def runAs(self, line_num, row_num, is_debug=False):
         line = self.vim.eval('getline(' + str(line_num) + ')')
         names = []
         configs = []
@@ -84,20 +143,26 @@ class Javim():
         buff = self.vim.current.buffer
         source_file = buff.name
         project = self.maven.workspace.projects()[buff.vars['project_name']]
-        config = configs[choosen].create_config(line,
-                                                row_num,
-                                                source_file,
-                                                project,
-                                                self.maven)
-        if not config:
-            self.print("Couldn't create a run-configuration, retry manually!")
+        def run_config():
+            buf_nr = int(self.vim.eval('bufnr("Console")'))
+            if buf_nr != -1:
+                self.vim.command("b %i | bw!" % buf_nr)
+            config = configs[choosen].create_config(line,
+                                                    row_num,
+                                                    source_file,
+                                                    project,
+                                                    self.maven)
+            if not config:
+                self.print("Couldn't create a run-configuration, retry manually!")
 
-        maven_config = project['maven_config']
+            self.__run_config(config, is_debug)
 
-        if maven_config['rebuild']:
-            self.maven.build_project(['clean', 'package', 'install'], project, maven_config['select_profiles'], maven_config['set_properties'])
+        self.maven.build_project_and_dependencies(project, run_config)
 
-        self.vim.command("bot new | call termopen('" + config.command().replace("'", "''") + "')")
+    def run_last(self, is_debug=False):
+        if self.last_config:
+            self.__run_config(self.last_config, is_debug)
+
 
     def get_project(self, name):
         if name in self.maven.workspace.projects():
@@ -153,6 +218,17 @@ class Javim():
         else:
             self.print("Project couldn't be imported!")
 
+    def select_project(self):
+        projects = [project['name'] for project in self.maven.workspace.projects()]
+        return self.maven.workspace.projects()[self.get_choice(projects)]
+
+    def project_close(self):
+        self.maven.workspace.close_project(self.select_project())
+
+    def project_open(self):
+        self.maven.workspace.open_project(self.select_project())
+
+
     def load_config(self, project_name, config_name):
         if project_name not in self.maven.workspace.projects():
             self.print("No project with name '" + project_name + "'!")
@@ -186,12 +262,54 @@ class Javim():
         config._save()
         self.vim.command("e " + config.path.replace("$", "\\$"))
         edit_buf = self.vim.current.buffer
-        self.vim.command("autocmd! BufWritePost <buffer=" +
-                         str(edit_buf.number) +
-                         "> python3 javim.load_config(" +
-                         project_name +
-                         ", " + 
-                         config_name + ")")
+        autocmd = "au! BufWritePost <buffer=%i> python3 javim.load_config(\"%s\", \"%s\")" % (edit_buf.number,
+                                                                                              project_name,
+                                                                                              config_name)
+        self.vim.command(autocmd)
+
+
+
+    def edit_project_configuration(self):
+        buff = self.vim.current.buffer
+        if not 'project_name' in buff.vars:
+            self.print("Not a managed project file!")
+            return
+
+        project_name = buff.vars['project_name']
+        project = self.maven.workspace.projects()[project_name]
+
+        _, tmp_name = tempfile.mkstemp(suffix=".json")
+
+        self.vim.command("enew")
+        self.vim.command("e %s" % tmp_name)
+        buffer = self.vim.current.buffer
+
+        run_configs = project['run_configs']
+        project['run_configs'] = {}
+        project_config = dumps(project, indent=4)
+        project['run_configs'] = run_configs
+        buffer[::] = project_config.split("\n")
+
+        bufnr = buffer.number
+        autocmd = "au! BufWriteCmd <buffer=%i> python3 javim.save_project_config(%i, '%s')" % (bufnr, bufnr, project_name)
+        self.vim.command(autocmd)
+        self.vim.command("au! BufDelete <buffer=%i> python3 os.remove('%s')" % (bufnr, tmp_name))
+
+    def save_project_config(self, bufnr, project_name):
+        workspace = self.maven.workspace
+        old_project = workspace.projects()[project_name]
+        buff = self.vim.buffers[bufnr]
+
+        try:
+            project = loads("\n".join(buff))
+            project['run_configs'] = old_project['run_configs']
+            workspace.projects()[project_name] = project
+            workspace._save()
+            self.vim.command("echom 'Project configuration saved successfully!'")
+        except Exception as e:
+            workspace.projects()[project_name] = old_project
+            workspace._save()
+            self.vim.command("echom 'Error saving project config: %s'" % str(e))
 
     def vim_quit(self):
         self.print("Saving javim settings...")
