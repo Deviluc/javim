@@ -60,7 +60,6 @@ class PersistentSetting():
             setting._save()
 
 
-
 class GlobalSetting(PersistentSetting):
     """ Represents an object that is persistent across sessions """
 
@@ -98,6 +97,8 @@ class Workspace(GlobalSetting):
             'projects': dict()
         }, self.__cleanup__)
 
+        Workspace.INSTANCE = self
+
         self.listeners = {
             'project_open': list(),
             'project_close': list()
@@ -124,12 +125,11 @@ class Workspace(GlobalSetting):
             for config in project['run_config_names'].values():
                 if config['provider_name'] in RunConfiguration.PROVIDER:
                     RunConfiguration.PROVIDER[config['provider_name']].load_config_func(config['config_name'], project)
-        Workspace.INSTANCE = self
 
 
     def __cleanup__(self, data):
         for project_name in data['projects']:
-            del data['projects'][project_name]['run_configs']
+            data['projects'][project_name]['run_configs'] = {}
 
     def import_project(self, name, directory):
         """ Adds a project to the workspace by creating a dynamic link """
@@ -203,6 +203,7 @@ class Workspace(GlobalSetting):
                 listener(project)
 
 
+
 class ProjectSetting(PersistentSetting):
     """ Represents an object that is persistent across sessions in a """
     """specific project"""
@@ -262,8 +263,19 @@ class ProgramArgument:
         self.template = template
         self.possible_values = possible_values
 
-    def build(self, value):
-        return self.template.replace("{value}", str(value))
+    def build(self, value=None):
+        if value is None:
+            return self.template
+        elif type(value) is dict:
+            res = self.template
+            for k in value:
+                res = res.replace("{" + k + "}", str(value[k]))
+
+            return res;
+        else:
+            return self.template.replace("{value}", str(value))
+
+        
 
 
 class JavaProgramArguments(Enum):
@@ -275,7 +287,8 @@ class JavaRunConfiguration(RunConfiguration):
 
     @staticmethod
     def filename_to_class(project, source_file):
-        for source_dir in project['maven_config']['source_dirs']:
+        config = project['maven_config']
+        for source_dir in config['source_dirs'] + config['test_source_dirs']:
             if source_file.startswith(source_dir):
                 main_class = source_file[len(source_dir) + 1:].replace("/", ".")
                 main_class = main_class[:-len(".java")]
@@ -301,13 +314,29 @@ class JavaRunConfiguration(RunConfiguration):
         JavaRunConfiguration(name, project, None, None).rebuild_commands()
 
     MAIN_METH_REGEX = re.compile("(public|static)\\s+(static|public)\\s+void\\s+main\\s*\\(\\s*(final\\s+)?String\\[\\]\\s+\\w+\\s*\\)")
-    BASE_COMMAND = "java -cp \"{classpath}\" {mainClass} {args}"
-    DEBUG_COMMAND = "java -agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address={port} -cp \"{classpath}\" {mainClass} {args}"
+    BASE_COMMAND = "cd {workdir} && java -cp \"{classpath}\" {mainClass} {args}"
+    DEBUG_COMMAND = "cd {workdir} && java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address={port} -cp \"{classpath}\" {mainClass} {args}"
 
     RunConfiguration.register_provider(RunConfigurationProvider("Java Application",
                                                                 mayrun.__func__,
                                                                 create_config.__func__,
                                                                 load_config.__func__))
+    @staticmethod
+    def build_src_path(project):
+        project_names = set({})
+        projects = [project]
+        while projects:
+            proj = projects.pop()
+            project_names.update({proj['name']})
+            for name in proj['maven_config']['dep_projects']:
+                projects.append(Workspace.INSTANCE.get_project(name))
+
+        projects = list(map(Workspace.INSTANCE.get_project, project_names))
+        src_path = []
+        for proj in projects:
+            for src_dir in proj['maven_config']['source_dirs'] + proj['maven_config']['test_source_dirs']:
+                src_path.append(src_dir)
+        return src_path
 
     def __init__(self, name, project, main, args: dict = {}):
         super(JavaRunConfiguration, self).__init__(name,
@@ -315,23 +344,27 @@ class JavaRunConfiguration(RunConfiguration):
                                                    command="",
                                                    extra={'main_class': main,
                                                           'classpath': project['maven_config']['classpath'],
-                                                          'args': args},
+                                                          'args': args,
+                                                          'src': JavaRunConfiguration.build_src_path(project)},
                                                    provider=RunConfiguration.PROVIDER["Java Application"],
                                                    on_load=lambda c: c.rebuild_commands())
         self.rebuild_commands()
 
     def rebuild_commands(self):
         project = Workspace.INSTANCE.projects()[self.project_name()]
+        self.set_src(JavaRunConfiguration.build_src_path(project))
         cp = project['maven_config']['classpath']
         main = self.main_class()
-        arg_str = " ".join(arg.build(value) for arg, value in self.args().items())
+        arg_str = " ".join(self.args())
         command = JavaRunConfiguration.BASE_COMMAND.replace("{classpath}", cp)
         command = command.replace("{mainClass}", main)
         command = command.replace("{args}", arg_str)
+        command = command.replace("{workdir}", project['path'])
 
         debug_command = JavaRunConfiguration.DEBUG_COMMAND.replace("{classpath}", cp)
         debug_command = debug_command.replace("{mainClass}", main)
         debug_command = debug_command.replace("{args}", arg_str)
+        debug_command = debug_command.replace("{workdir}", project['path'])
 
         self.set_command(command)
         self.set_debug_command(debug_command)
